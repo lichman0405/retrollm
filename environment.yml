@@ -1,0 +1,19 @@
+name: retrollm
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy<2
+  - pandas>=1.5,<3
+  - pytables
+  - pyyaml
+  - requests
+  - tqdm
+  - rdkit>=2023.9
+  - onnxruntime>=1.16
+  - pip:
+      - python-dotenv>=1.0.0
+      - rdchiral
+      - pytest>=7
+      - rich>=13
