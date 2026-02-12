@@ -6,6 +6,7 @@ It does **not** import or depend on `aizynthfinder` code, but it can reuse the *
 This repository is intentionally English-only for code, docs, and comments.
 
 For full cross-platform environment instructions, see `SETUP.md`.
+For complete CLI argument documentation, see `CLI_REFERENCE.md`.
 
 ## Quick start (Conda recommended)
 
