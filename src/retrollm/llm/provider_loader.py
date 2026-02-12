@@ -14,8 +14,20 @@ from retrollm.llm.providers.base import LLMProvider
 from retrollm.llm.providers.openai_compatible import OpenAICompatibleProvider
 
 
+_OPENAI_COMPATIBLE_SPEC = (
+    "retrollm.llm.providers.openai_compatible:OpenAICompatibleProvider"
+)
 _ALIASES: Dict[str, str] = {
-    "openai_compatible": "retrollm.llm.providers.openai_compatible:OpenAICompatibleProvider",
+    "openai_compatible": _OPENAI_COMPATIBLE_SPEC,
+    "openai-compatible": _OPENAI_COMPATIBLE_SPEC,
+    "openai": _OPENAI_COMPATIBLE_SPEC,
+    "deepseek": _OPENAI_COMPATIBLE_SPEC,
+    "deep_seek": _OPENAI_COMPATIBLE_SPEC,
+    "openrouter": _OPENAI_COMPATIBLE_SPEC,
+    "siliconflow": _OPENAI_COMPATIBLE_SPEC,
+    "moonshot": _OPENAI_COMPATIBLE_SPEC,
+    "kimi": _OPENAI_COMPATIBLE_SPEC,
+    "qwen": _OPENAI_COMPATIBLE_SPEC,
 }
 
 
@@ -48,8 +60,26 @@ def load_llm_settings_from_env(prefix: str = "RETROLLM_LLM_") -> Optional[LLMSet
     )
 
 
-def _resolve_provider_spec(provider: str) -> str:
-    return _ALIASES.get(provider, provider)
+def _normalize_provider(provider: str) -> str:
+    return provider.strip().lower()
+
+
+def _resolve_provider_spec(settings: LLMSettings) -> str:
+    provider = settings.provider.strip()
+    normalized = _normalize_provider(provider)
+    if normalized in _ALIASES:
+        return _ALIASES[normalized]
+    if ":" in provider:
+        return provider
+    if settings.base_url:
+        # For any plain provider name with BASE_URL set, assume OpenAI-compatible mode.
+        return _OPENAI_COMPATIBLE_SPEC
+    raise ValueError(
+        "Unknown provider alias "
+        f"'{provider}'. Use RETROLLM_LLM_PROVIDER=openai_compatible "
+        "(or deepseek/openrouter/etc.) for OpenAI-compatible endpoints, "
+        "or a class path 'package.module:ClassName'."
+    )
 
 
 def _import_from_spec(spec: str) -> Type[Any]:
@@ -64,7 +94,7 @@ def _import_from_spec(spec: str) -> Type[Any]:
 
 
 def build_provider(settings: LLMSettings) -> LLMProvider:
-    spec = _resolve_provider_spec(settings.provider)
+    spec = _resolve_provider_spec(settings)
     cls = _import_from_spec(spec)
 
     if cls is OpenAICompatibleProvider:

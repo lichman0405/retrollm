@@ -219,21 +219,54 @@ def _check_llm_env() -> CheckResult:
             hint="Set RETROLLM_LLM_MODEL in .env.",
         )
 
-    if provider == "openai_compatible":
-        base_url = os.environ.get("RETROLLM_LLM_BASE_URL", "").strip()
-        api_key = os.environ.get("RETROLLM_LLM_API_KEY", "").strip()
-        if not base_url or not api_key:
-            return CheckResult(
-                name="LLM configuration",
-                status="fail",
-                detail="openai_compatible provider requires BASE_URL and API_KEY.",
-                hint="Set RETROLLM_LLM_BASE_URL and RETROLLM_LLM_API_KEY in .env.",
-            )
+    base_url = os.environ.get("RETROLLM_LLM_BASE_URL", "").strip()
+    api_key = os.environ.get("RETROLLM_LLM_API_KEY", "").strip()
+    normalized = provider.lower()
+    known_openai_compatible = {
+        "openai_compatible",
+        "openai-compatible",
+        "openai",
+        "deepseek",
+        "deep_seek",
+        "openrouter",
+        "siliconflow",
+        "moonshot",
+        "kimi",
+        "qwen",
+    }
+    is_custom_class_path = ":" in provider
+    inferred_openai_compatible = (normalized in known_openai_compatible) or (
+        not is_custom_class_path and bool(base_url)
+    )
+
+    if not is_custom_class_path and normalized not in known_openai_compatible and not base_url:
+        return CheckResult(
+            name="LLM configuration",
+            status="fail",
+            detail=(
+                f"Provider '{provider}' is not a known alias and BASE_URL is empty."
+            ),
+            hint=(
+                "Set RETROLLM_LLM_PROVIDER=openai_compatible (or deepseek/openrouter) "
+                "with BASE_URL/API_KEY, or use class path 'package.module:ClassName'."
+            ),
+        )
+
+    if inferred_openai_compatible and (not base_url or not api_key):
+        return CheckResult(
+            name="LLM configuration",
+            status="fail",
+            detail="OpenAI-compatible mode requires BASE_URL and API_KEY.",
+            hint="Set RETROLLM_LLM_BASE_URL and RETROLLM_LLM_API_KEY in .env.",
+        )
 
     return CheckResult(
         name="LLM configuration",
         status="ok",
-        detail=f"Provider '{provider}' is configured.",
+        detail=(
+            f"Provider '{provider}' is configured"
+            + (" (openai-compatible mode)." if inferred_openai_compatible else ".")
+        ),
     )
 
 

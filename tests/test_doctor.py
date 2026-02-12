@@ -21,6 +21,15 @@ def test_check_llm_env_fail_for_openai_missing_fields(monkeypatch) -> None:
     assert check.status == "fail"
 
 
+def test_check_llm_env_fail_for_deepseek_missing_fields(monkeypatch) -> None:
+    monkeypatch.setenv("RETROLLM_LLM_PROVIDER", "DeepSeek")
+    monkeypatch.setenv("RETROLLM_LLM_MODEL", "deepseek-chat")
+    monkeypatch.delenv("RETROLLM_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("RETROLLM_LLM_API_KEY", raising=False)
+    check = doctor._check_llm_env()
+    assert check.status == "fail"
+
+
 def test_run_doctor_missing_config_reports_failure(tmp_path: Path) -> None:
     report = doctor.run_doctor(tmp_path / "missing_config.yml")
     assert any(

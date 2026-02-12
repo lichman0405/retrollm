@@ -70,6 +70,7 @@ Create and fill `.env` in the project root (already present, gitignored).
 The LLM system is provider-pluggable.
 
 - Built-in alias: `RETROLLM_LLM_PROVIDER=openai_compatible`
+- Common OpenAI-compatible aliases also supported: `deepseek`, `openrouter`, `siliconflow`, `qwen`, `kimi`
 - Custom provider: `RETROLLM_LLM_PROVIDER=yourpkg.yourmod:YourProvider`
 
 The OpenAI-compatible provider uses:
@@ -77,6 +78,15 @@ The OpenAI-compatible provider uses:
 - `RETROLLM_LLM_BASE_URL`
 - `RETROLLM_LLM_API_KEY`
 - `RETROLLM_LLM_MODEL`
+
+Example (`DeepSeek` endpoint, OpenAI-compatible API):
+
+```env
+RETROLLM_LLM_PROVIDER=deepseek
+RETROLLM_LLM_BASE_URL=https://api.deepseek.com
+RETROLLM_LLM_API_KEY=your_key
+RETROLLM_LLM_MODEL=deepseek-chat
+```
 
 ## Development
 
