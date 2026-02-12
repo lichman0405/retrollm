@@ -88,6 +88,129 @@ def _source_text(value: str) -> Text:
     return Text(value, style=style)
 
 
+class _SearchProgressLogger:
+    def __init__(self, console: Console, verbose: bool = False):
+        self.console = console
+        self.verbose = verbose
+
+    def __call__(self, event: str, payload: dict[str, Any]) -> None:
+        if event == "search_start":
+            self.console.log(
+                "[bold cyan]Search start[/] "
+                f"target={payload.get('target_smiles')} "
+                f"iter={payload.get('iteration_limit')} "
+                f"time={_format_float(payload.get('time_limit_s'))}s "
+                f"depth={payload.get('max_depth')} topk={payload.get('topk_templates')}"
+            )
+            return
+
+        if event == "artifacts_ready":
+            self.console.log(
+                "[cyan]Artifacts ready[/] "
+                f"policy={payload.get('policy')} filter={payload.get('filter')} "
+                f"templates={payload.get('templates')} stock={payload.get('stock')} "
+                f"ringbreaker={payload.get('ringbreaker')}"
+            )
+            return
+
+        if event == "tree_start":
+            self.console.log(
+                "[cyan]Tree run[/] "
+                f"use_filter={payload.get('use_filter')} "
+                f"use_ringbreaker={payload.get('use_ringbreaker')} "
+                f"use_llm={payload.get('use_llm')}"
+            )
+            return
+
+        if event == "heartbeat":
+            self.console.log(
+                "[dim]progress[/] "
+                f"iter={payload.get('iteration')}/{payload.get('iteration_limit')} "
+                f"elapsed={_format_float(payload.get('elapsed_s'))}s "
+                f"iter/s={_format_float(payload.get('iter_per_s'))} "
+                f"root_children={payload.get('root_children')} "
+                f"best_score={_format_float(payload.get('best_score'))} "
+                f"best_depth={payload.get('best_depth')} "
+                f"first_solution_iter={payload.get('first_solution_iteration') or '-'}"
+            )
+            return
+
+        if event == "first_solution":
+            self.console.log(
+                "[bold green]First solution found[/] "
+                f"iter={payload.get('iteration')} depth={payload.get('depth')} "
+                f"elapsed={_format_float(payload.get('elapsed_s'))}s"
+            )
+            return
+
+        if event == "llm_adjust_start":
+            self.console.log(
+                "[yellow]LLM adjust start[/] "
+                f"iter={payload.get('iteration')} c_puct={payload.get('c_puct')} "
+                f"topk={payload.get('topk_templates')}"
+            )
+            return
+
+        if event == "llm_adjust_end":
+            self.console.log(
+                "[yellow]LLM adjust done[/] "
+                f"iter={payload.get('iteration')} c_puct={payload.get('c_puct')} "
+                f"topk={payload.get('topk_templates')}"
+            )
+            return
+
+        if event == "retry_start":
+            self.console.log(
+                "[bold yellow]Retry start[/] "
+                f"attempt={payload.get('attempt')} plan={payload.get('retry_plan')}"
+            )
+            return
+
+        if event == "retry_end":
+            self.console.log(
+                "[bold yellow]Retry end[/] "
+                f"attempt={payload.get('attempt')} solved={payload.get('solved')} "
+                f"routes={payload.get('routes')} iterations={payload.get('iterations')}"
+            )
+            return
+
+        if event == "rerank_done":
+            if self.verbose:
+                self.console.log(
+                    "[cyan]Rerank[/] "
+                    f"applied={payload.get('applied')} mode={payload.get('mode')} "
+                    f"reason={payload.get('reason')}"
+                )
+            return
+
+        if event == "tree_stop":
+            self.console.log(
+                "[cyan]Tree stop[/] "
+                f"reason={payload.get('reason')} iter={payload.get('iteration')} "
+                f"elapsed={_format_float(payload.get('elapsed_s'))}s"
+            )
+            return
+
+        if event == "tree_done":
+            self.console.log(
+                "[cyan]Tree done[/] "
+                f"solved={payload.get('solved')} routes={payload.get('routes')} "
+                f"iter={payload.get('iterations')} root_children={payload.get('root_children')}"
+            )
+            return
+
+        if event == "search_done":
+            self.console.log(
+                "[bold cyan]Search done[/] "
+                f"solved={payload.get('solved')} routes={payload.get('routes')} "
+                f"iter={payload.get('iterations')} retries={payload.get('retry_attempts')}"
+            )
+            return
+
+        if self.verbose:
+            self.console.log(f"[dim]{event}[/] {payload}")
+
+
 def _no_route_reason_message(reason: str | None) -> tuple[str, str]:
     return {
         "target_in_stock": (
@@ -376,8 +499,15 @@ def _cmd_search(args: argparse.Namespace) -> int:
         llm_retry_on_failure=not args.no_llm_retry,
         llm_max_retry_attempts=args.llm_max_retries,
     )
+    console = _build_console(no_color=args.no_color)
+    progress_callback = None if args.json else _SearchProgressLogger(console, verbose=args.verbose)
+
     planner = Planner.from_config_file(args.config, search_config=config)
-    result = planner.search(args.smiles, use_llm=args.use_llm)
+    result = planner.search_with_progress(
+        args.smiles,
+        use_llm=args.use_llm,
+        progress_callback=progress_callback,
+    )
     payload = asdict(result)
 
     if args.output:
@@ -388,7 +518,6 @@ def _cmd_search(args: argparse.Namespace) -> int:
         if isinstance(handoff, str) and handoff.strip():
             report_path = _write_text(args.report, handoff)
 
-    console = _build_console(no_color=args.no_color)
     if args.json:
         console.print(json.dumps(payload, indent=2))
     else:

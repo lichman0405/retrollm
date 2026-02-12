@@ -123,6 +123,7 @@ retrollm search --config <path> --smiles <SMILES> [options]
 
 ### Search Output Sections (default human-readable mode)
 
+0. Runtime progress logs (during search)
 1. Search Summary
 2. Constraint Translation (if available)
 3. Route Rerank (if available)
@@ -136,6 +137,9 @@ retrollm search --config <path> --smiles <SMILES> [options]
 1. Without `--use-llm`, core search still works (policy/filter/ringbreaker).
 2. `--constraints` still has heuristic handling even when LLM is disabled.
 3. `--report` writes only if handoff text is available.
+4. In default output mode, `search` prints runtime progress logs (startup, periodic heartbeat, and key events like first solution/retry/stop reason).
+5. `--verbose` adds extra diagnostic output after search (config snapshot, LLM events, readable `template_smarts`) and can include richer event details.
+6. `--json` suppresses runtime progress logs to keep stdout machine-readable.
 
 ## Command: `doctor`
 

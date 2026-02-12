@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import time
+from typing import Any, Callable
 
 from retrollm.chem import Molecule
 from retrollm.llm.controller import LLMMetaController
@@ -69,6 +70,7 @@ class SearchTree:
         ringbreaker_policy: OnnxTemplatePolicy | None = None,
         ringbreaker_templates: TemplateLibrary | None = None,
         constraints: dict | None = None,
+        progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ):
         self.stock = stock
         self.policy = policy
@@ -80,6 +82,7 @@ class SearchTree:
         self.ringbreaker_policy = ringbreaker_policy
         self.ringbreaker_templates = ringbreaker_templates
         self.constraints = constraints or {}
+        self.progress_callback = progress_callback
         self.root = SearchNode(state=SearchState(molecules=(target,), depth=0), prior=1.0)
 
         self._seen_states: set[tuple[str, ...]] = {self.root.state.key()}
@@ -91,12 +94,56 @@ class SearchTree:
         self.first_solution_iteration: int | None = None
         self.iterations: int = 0
 
+    def _emit_progress(self, event: str, payload: dict[str, Any]) -> None:
+        if self.progress_callback is None:
+            return
+        try:
+            self.progress_callback(event, payload)
+        except Exception:
+            return
+
+    def _best_node_snapshot(self) -> tuple[float, int]:
+        best_score = 0.0
+        best_depth = 0
+        for node in self._all_nodes:
+            if node.visits <= 0:
+                continue
+            q = node.q_value()
+            if q > best_score:
+                best_score = q
+                best_depth = node.state.depth
+        return best_score, best_depth
+
     def run(self) -> SearchResult:
         t0 = time.time()
+        heartbeat_every = max(1, min(20, self.config.iteration_limit // 10 or 1))
+        self._emit_progress(
+            "tree_start",
+            {
+                "iteration_limit": self.config.iteration_limit,
+                "time_limit_s": self.config.time_limit_s,
+                "max_depth": self.config.max_depth,
+                "topk_templates": self.config.topk_templates,
+                "use_filter": self.config.use_filter and self.filter_policy is not None,
+                "use_ringbreaker": self.config.use_ringbreaker
+                and self.ringbreaker_policy is not None
+                and self.ringbreaker_templates is not None,
+                "use_llm": self.llm_controller is not None,
+            },
+        )
 
         for i in range(1, self.config.iteration_limit + 1):
             self.iterations = i
-            if time.time() - t0 > self.config.time_limit_s:
+            elapsed = time.time() - t0
+            if elapsed > self.config.time_limit_s:
+                self._emit_progress(
+                    "tree_stop",
+                    {
+                        "reason": "time_limit_reached",
+                        "iteration": i,
+                        "elapsed_s": elapsed,
+                    },
+                )
                 break
 
             node = self._select(self.root)
@@ -108,12 +155,64 @@ class SearchTree:
 
             if self.first_solution_iteration is None and node.state.is_solved(self.stock):
                 self.first_solution_iteration = i
+                self._emit_progress(
+                    "first_solution",
+                    {
+                        "iteration": i,
+                        "elapsed_s": time.time() - t0,
+                        "depth": node.state.depth,
+                    },
+                )
+
+            if i % heartbeat_every == 0:
+                elapsed_hb = time.time() - t0
+                best_score, best_depth = self._best_node_snapshot()
+                iter_per_s = i / max(elapsed_hb, 1e-9)
+                self._emit_progress(
+                    "heartbeat",
+                    {
+                        "iteration": i,
+                        "iteration_limit": self.config.iteration_limit,
+                        "elapsed_s": elapsed_hb,
+                        "iter_per_s": iter_per_s,
+                        "root_children": len(self.root.children),
+                        "best_score": best_score,
+                        "best_depth": best_depth,
+                        "first_solution_iteration": self.first_solution_iteration,
+                    },
+                )
 
             if (
                 self.llm_controller is not None
                 and i % self.config.llm_intervention_interval == 0
             ):
+                self._emit_progress(
+                    "llm_adjust_start",
+                    {
+                        "iteration": i,
+                        "c_puct": self.config.c_puct,
+                        "topk_templates": self.config.topk_templates,
+                    },
+                )
                 self.llm_controller.maybe_adjust(self)
+                self._emit_progress(
+                    "llm_adjust_end",
+                    {
+                        "iteration": i,
+                        "c_puct": self.config.c_puct,
+                        "topk_templates": self.config.topk_templates,
+                    },
+                )
+
+        if self.iterations >= self.config.iteration_limit:
+            self._emit_progress(
+                "tree_stop",
+                {
+                    "reason": "iteration_limit_reached",
+                    "iteration": self.iterations,
+                    "elapsed_s": time.time() - t0,
+                },
+            )
 
         routes = self._collect_routes(self.config.max_routes * 3)
         if (
@@ -137,6 +236,18 @@ class SearchTree:
                     "reason": "rerank_error",
                     "error": str(exc),
                 }
+        self._emit_progress(
+            "rerank_done",
+            {
+                "applied": bool(self._rerank_meta.get("applied", False)),
+                "mode": str(self._rerank_meta.get("mode", "-")),
+                "reason": str(
+                    self._rerank_meta.get(
+                        "global_reason", self._rerank_meta.get("reason", "-")
+                    )
+                ),
+            },
+        )
         routes = routes[: self.config.max_routes]
 
         solved = self.first_solution_iteration is not None or self.root.state.is_solved(self.stock)
@@ -153,6 +264,17 @@ class SearchTree:
             if self.llm_controller is not None
             else [],
         }
+        self._emit_progress(
+            "tree_done",
+            {
+                "solved": solved,
+                "iterations": self.iterations,
+                "elapsed_s": time.time() - t0,
+                "root_children": len(self.root.children),
+                "routes": len(routes),
+                "no_route_reason": no_route_reason,
+            },
+        )
         return SearchResult(
             solved=solved,
             first_solution_iteration=self.first_solution_iteration,

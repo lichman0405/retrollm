@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 import re
-from typing import Any
+from typing import Any, Callable
 
 from retrollm.chem import Molecule
 from retrollm.config import ArtifactsConfig, load_artifacts_config
@@ -41,13 +41,48 @@ class Planner:
         return cls(artifacts=artifacts, search_config=search_config or SearchConfig())
 
     def search(self, target_smiles: str, use_llm: bool = False) -> SearchResult:
+        return self.search_with_progress(target_smiles=target_smiles, use_llm=use_llm)
+
+    def search_with_progress(
+        self,
+        target_smiles: str,
+        use_llm: bool = False,
+        progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> SearchResult:
         llm_controller = LLMMetaController.from_env() if use_llm else None
+        self._emit_progress(
+            progress_callback,
+            "search_start",
+            {
+                "target_smiles": target_smiles,
+                "use_llm": use_llm,
+                "iteration_limit": self.search_config.iteration_limit,
+                "time_limit_s": self.search_config.time_limit_s,
+                "max_depth": self.search_config.max_depth,
+                "topk_templates": self.search_config.topk_templates,
+                "use_filter": self.search_config.use_filter,
+                "use_ringbreaker": self.search_config.use_ringbreaker,
+            },
+        )
+        self._emit_progress(
+            progress_callback,
+            "artifacts_ready",
+            {
+                "policy": True,
+                "filter": self.filter_policy is not None,
+                "templates": True,
+                "stock": True,
+                "ringbreaker": self.ringbreaker_policy is not None
+                and self.ringbreaker_templates is not None,
+            },
+        )
         constraints = self._resolve_constraints(llm_controller)
         result = self._run_search_once(
             target_smiles=target_smiles,
             config=self.search_config,
             llm_controller=llm_controller,
             constraints=constraints,
+            progress_callback=progress_callback,
         )
 
         retry_attempts = 0
@@ -74,11 +109,20 @@ class Planner:
                         break
 
                     retry_attempts += 1
+                    self._emit_progress(
+                        progress_callback,
+                        "retry_start",
+                        {
+                            "attempt": retry_attempts,
+                            "retry_plan": retry_plan,
+                        },
+                    )
                     retry_result = self._run_search_once(
                         target_smiles=target_smiles,
                         config=next_config,
                         llm_controller=llm_controller,
                         constraints=constraints,
+                        progress_callback=progress_callback,
                     )
                     retry_result.retry_attempts = retry_attempts
                     retry_result.llm["retry_plan_applied"] = retry_plan
@@ -87,6 +131,16 @@ class Planner:
 
                     if self._is_better_result(retry_result, current):
                         current = retry_result
+                    self._emit_progress(
+                        progress_callback,
+                        "retry_end",
+                        {
+                            "attempt": retry_attempts,
+                            "solved": retry_result.solved,
+                            "routes": len(retry_result.routes),
+                            "iterations": retry_result.iterations,
+                        },
+                    )
                     current_config = next_config
                     if current.solved:
                         break
@@ -102,6 +156,16 @@ class Planner:
                 no_route_reason=result.no_route_reason,
             )
             result.llm["handoff_markdown"] = handoff
+        self._emit_progress(
+            progress_callback,
+            "search_done",
+            {
+                "solved": result.solved,
+                "routes": len(result.routes),
+                "iterations": result.iterations,
+                "retry_attempts": result.retry_attempts,
+            },
+        )
         return result
 
     def _run_search_once(
@@ -110,6 +174,7 @@ class Planner:
         config: SearchConfig,
         llm_controller: LLMMetaController | None,
         constraints: dict[str, Any],
+        progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> SearchResult:
         tree = SearchTree(
             target=Molecule(target_smiles),
@@ -123,8 +188,22 @@ class Planner:
             ringbreaker_policy=self.ringbreaker_policy,
             ringbreaker_templates=self.ringbreaker_templates,
             constraints=constraints,
+            progress_callback=progress_callback,
         )
         return tree.run()
+
+    def _emit_progress(
+        self,
+        callback: Callable[[str, dict[str, Any]], None] | None,
+        event: str,
+        payload: dict[str, Any],
+    ) -> None:
+        if callback is None:
+            return
+        try:
+            callback(event, payload)
+        except Exception:
+            return
 
     def _resolve_constraints(
         self, llm_controller: LLMMetaController | None
