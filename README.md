@@ -71,6 +71,11 @@ retrollm search --config ./data/config.yml --smiles "CC(=O)Oc1ccccc1C(=O)O"
 Search output is pretty-printed by default for terminal readability.
 Use `--json` for machine-readable output, and `--output result.json` to save JSON.
 
+During `search`, the CLI also prints runtime progress logs by default (startup, periodic heartbeat, and key events like first solution/retry/stop reason).
+
+- Use `--json` to keep stdout strictly machine-readable (runtime progress logs are suppressed).
+- Use `--verbose` to add extra post-search diagnostics (config snapshot, LLM events, readable `template_smarts`).
+
 ### 🔬 Search Policies
 
 `retrollm search` uses:
