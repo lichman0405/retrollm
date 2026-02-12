@@ -276,6 +276,26 @@ def _render_search_result(
                 _format_float(step.get("filter_score")),
             )
         console.print(steps)
+
+        if verbose:
+            try:
+                from retrollm.utils.smarts import format_reaction_smarts
+
+                for step in route.get("steps", []):
+                    smarts = step.get("template_smarts")
+                    if not smarts:
+                        continue
+                    formatted = format_reaction_smarts(str(smarts), simplify=True)
+                    console.print(
+                        Panel(
+                            Text(formatted, style="white"),
+                            title=f"Step {step.get('step', '?')} template_smarts",
+                            border_style="bright_black",
+                            expand=False,
+                        )
+                    )
+            except Exception:
+                pass
         if route.get("llm_rank_reason"):
             console.print(
                 Text(

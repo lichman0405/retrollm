@@ -81,6 +81,59 @@ Use `--json` for machine-readable output, and `--output result.json` to save JSO
 | USPTO filter policy | `--no-filter` |
 | Ringbreaker fallback expansion | `--no-ringbreaker` |
 
+---
+
+## 🧾 Understanding the JSON Output
+
+When you run `retrollm search` with `--json` or `--output result.json`, each route contains a list of `steps`.
+Some fields are model- or template-library specific, so the raw JSON can look confusing at first.
+
+### Template fields
+
+- `template_index`
+  - An integer ID predicted by the expansion policy.
+  - It is used as a row index into the template library CSV (see `expansion.uspto[1]` in `data/config.yml`).
+- `template_smarts`
+  - The reaction SMARTS string for that template.
+  - RetroLLM uses templates in retrosynthesis direction:
+    - `product_pattern >> reactant1.reactant2...`
+  - Atom-mapping tags like `:12` improve machine alignment but reduce readability.
+
+To pretty-print a template SMARTS in a human-friendly way:
+
+```python
+from retrollm.utils.smarts import format_reaction_smarts
+
+print(format_reaction_smarts(template_smarts, simplify=True))
+```
+
+If you run `retrollm search --verbose`, the CLI also prints a readable multi-line view of each step's `template_smarts`.
+
+### Model scores
+
+- `policy_probability`
+  - The expansion policy model's output score for the chosen template.
+  - It is also used as the MCTS prior when selecting which child node to explore.
+- `filter_score`
+  - The filter model score for the proposed (product, reactants) reaction candidate.
+  - If `filter_score < filter_cutoff`, the candidate is discarded.
+
+### Route `score`
+
+Each route's `score` is the MCTS node value estimate:
+
+- `score = q_value = value_sum / visits`
+
+Each simulation evaluates a node with a simple heuristic:
+
+- Let $r$ be the fraction of molecules in the current state that are found in stock.
+- If all molecules are in stock, value is `1.0`.
+- Otherwise:
+  - `value = max(0, r - depth_penalty)`
+  - `depth_penalty = min(depth/max_depth, 1) * 0.2`
+
+So higher `score` generally means "more of the current molecules are already purchasable" while avoiding overly deep routes.
+
 ### 🤖 Full LLM Workflow
 
 Enable meta-control, constraint translation, subgoal advisor, route reranking, failure diagnosis/retry, and handoff draft:
