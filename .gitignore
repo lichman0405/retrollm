@@ -10,6 +10,4 @@ dist/
 build/
 *.egg-info/
 .env
-data/
-
-.conda/
+/data/

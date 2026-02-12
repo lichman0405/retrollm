@@ -24,6 +24,13 @@ def _write_json(path: str | Path, payload: dict[str, Any]) -> Path:
     return out
 
 
+def _write_text(path: str | Path, text: str) -> Path:
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
+    return out
+
+
 def _cmd_download_data(args: argparse.Namespace) -> int:
     from retrollm.data.public_data import download_public_data
 
@@ -69,10 +76,50 @@ def _render_search_result(
     summary.add_row("Iterations", str(payload.get("iterations")))
     summary.add_row("Search time (s)", _format_float(payload.get("search_time_s")))
     summary.add_row("Root children", str(payload.get("root_children")))
+    summary.add_row("Retry attempts", str(payload.get("retry_attempts", 0)))
     if output_path:
         summary.add_row("Saved JSON", str(Path(output_path).resolve()))
 
     console.print(Panel(summary, title="Search Summary", expand=False))
+
+    llm_payload = payload.get("llm", {})
+    constraints = llm_payload.get("constraints", {})
+    if constraints:
+        ctable = Table(show_header=False, box=None)
+        ctable.add_row("source", str(constraints.get("source", "unknown")))
+        ctable.add_row("avoid_reactants", ", ".join(constraints.get("avoid_reactants", [])) or "-")
+        ctable.add_row(
+            "avoid_template_indices",
+            ", ".join(str(v) for v in constraints.get("avoid_template_indices", [])) or "-",
+        )
+        ctable.add_row("max_steps", str(constraints.get("max_steps", "-")))
+        ctable.add_row(
+            "prefer_in_stock_subgoals",
+            str(constraints.get("prefer_in_stock_subgoals", False)),
+        )
+        notes = str(constraints.get("notes", "")).strip()
+        if notes:
+            ctable.add_row("notes", notes)
+        console.print(Panel(ctable, title="Constraint Translation", expand=False))
+
+    rerank = llm_payload.get("rerank", {})
+    if rerank:
+        rtable = Table(show_header=False, box=None)
+        rtable.add_row("applied", str(rerank.get("applied", False)))
+        rtable.add_row("mode", str(rerank.get("mode", "-")))
+        rtable.add_row("reason", str(rerank.get("global_reason", rerank.get("reason", "-"))))
+        if rerank.get("error"):
+            rtable.add_row("error", str(rerank.get("error")))
+        console.print(Panel(rtable, title="Route Rerank", expand=False))
+
+    diagnosis = llm_payload.get("diagnosis")
+    if isinstance(diagnosis, dict) and diagnosis:
+        dtable = Table(show_header=False, box=None)
+        dtable.add_row("source", str(diagnosis.get("source", "-")))
+        dtable.add_row("diagnosis", str(diagnosis.get("diagnosis", "-")))
+        dtable.add_row("rationale", str(diagnosis.get("rationale", "-")))
+        dtable.add_row("retry_plan", json.dumps(diagnosis.get("retry_plan", {}), ensure_ascii=False))
+        console.print(Panel(dtable, title="Failure Diagnosis", expand=False))
 
     routes = payload.get("routes", [])
     if not routes:
@@ -81,7 +128,8 @@ def _render_search_result(
         header = (
             f"score={_format_float(route.get('score'))}  "
             f"visits={route.get('visits')}  depth={route.get('depth')}  "
-            f"solved={'yes' if route.get('solved') else 'no'}"
+            f"solved={'yes' if route.get('solved') else 'no'}  "
+            f"llm_rank={route.get('llm_rank', '-')}"
         )
         console.print(Panel(header, title=f"Route {idx}", expand=False))
         steps = Table()
@@ -103,10 +151,27 @@ def _render_search_result(
                 _format_float(step.get("filter_score")),
             )
         console.print(steps)
+        if route.get("llm_rank_reason"):
+            console.print(f"LLM reason: {route.get('llm_rank_reason')}")
+
+    handoff = llm_payload.get("handoff_markdown")
+    if isinstance(handoff, str) and handoff.strip():
+        preview_lines = handoff.strip().splitlines()[:10]
+        console.print(Panel("\n".join(preview_lines), title="Handoff Preview", expand=False))
 
     if verbose:
         cfg = payload.get("config_snapshot", {})
         console.print(Panel(json.dumps(cfg, indent=2), title="Config Snapshot"))
+        events = llm_payload.get("events", [])
+        if isinstance(events, list) and events:
+            event_table = Table("Stage", "Message", "Payload")
+            for event in events[-20:]:
+                event_table.add_row(
+                    str(event.get("stage", "")),
+                    str(event.get("message", "")),
+                    json.dumps(event.get("payload", {}), ensure_ascii=False),
+                )
+            console.print(Panel(event_table, title="LLM Events"))
 
 
 def _cmd_search(args: argparse.Namespace) -> int:
@@ -125,6 +190,13 @@ def _cmd_search(args: argparse.Namespace) -> int:
         use_ringbreaker=not args.no_ringbreaker,
         ringbreaker_topk=args.ringbreaker_topk,
         max_routes=args.max_routes,
+        constraints_text=args.constraints,
+        llm_use_subgoal_advisor=not args.no_llm_advisor,
+        llm_use_route_reranker=not args.no_llm_rerank,
+        llm_use_failure_diagnosis=not args.no_llm_diagnosis,
+        llm_use_handoff=not args.no_llm_handoff,
+        llm_retry_on_failure=not args.no_llm_retry,
+        llm_max_retry_attempts=args.llm_max_retries,
     )
     planner = Planner.from_config_file(args.config, search_config=config)
     result = planner.search(args.smiles, use_llm=args.use_llm)
@@ -132,12 +204,21 @@ def _cmd_search(args: argparse.Namespace) -> int:
 
     if args.output:
         _write_json(args.output, payload)
+    report_path: Path | None = None
+    if args.report:
+        handoff = payload.get("llm", {}).get("handoff_markdown", "")
+        if isinstance(handoff, str) and handoff.strip():
+            report_path = _write_text(args.report, handoff)
 
     console = Console()
     if args.json:
         console.print(json.dumps(payload, indent=2))
     else:
         _render_search_result(console, payload, output_path=args.output, verbose=args.verbose)
+    if report_path is not None:
+        console.print(f"Saved handoff report: {report_path.resolve()}")
+    elif args.report:
+        console.print("Handoff report was not generated (try enabling --use-llm).")
     return 0
 
 
@@ -215,13 +296,21 @@ def _set_common_search_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-depth", type=int, default=6)
     parser.add_argument("--llm-interval", type=int, default=50)
     parser.add_argument("--use-llm", action="store_true")
+    parser.add_argument("--constraints", default="", help="Natural-language search constraints")
     parser.add_argument("--no-filter", action="store_true")
     parser.add_argument("--filter-cutoff", type=float, default=0.0)
     parser.add_argument("--no-ringbreaker", action="store_true")
     parser.add_argument("--ringbreaker-topk", type=int, default=10)
     parser.add_argument("--max-routes", type=int, default=3)
+    parser.add_argument("--no-llm-advisor", action="store_true")
+    parser.add_argument("--no-llm-rerank", action="store_true")
+    parser.add_argument("--no-llm-diagnosis", action="store_true")
+    parser.add_argument("--no-llm-handoff", action="store_true")
+    parser.add_argument("--no-llm-retry", action="store_true")
+    parser.add_argument("--llm-max-retries", type=int, default=1)
     parser.add_argument("--json", action="store_true", help="Print raw JSON result")
     parser.add_argument("--output", help="Write JSON result to a file")
+    parser.add_argument("--report", help="Write markdown handoff report to a file")
     parser.add_argument("--verbose", action="store_true")
 
 

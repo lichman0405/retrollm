@@ -50,6 +50,19 @@ Use `--json` for machine-readable output, and `--output result.json` to save JSO
 - USPTO filter policy (`--no-filter` to disable)
 - Ringbreaker fallback expansion (`--no-ringbreaker` to disable)
 
+Enable full LLM workflow (meta-control + constraint translation + subgoal advisor +
+route reranking + failure diagnosis/retry + handoff draft):
+
+```bash
+retrollm search \
+  --config ./data/config.yml \
+  --smiles "CC(=O)Oc1ccccc1C(=O)O" \
+  --use-llm \
+  --constraints "avoid Pd catalysts and keep route within 6 steps" \
+  --report ./handoff.md \
+  --verbose
+```
+
 ## LLM configuration
 
 Create and fill `.env` in the project root (already present, gitignored).

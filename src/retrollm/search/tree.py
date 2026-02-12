@@ -30,6 +30,13 @@ class SearchConfig:
     use_ringbreaker: bool = True
     ringbreaker_topk: int = 10
     max_routes: int = 3
+    constraints_text: str = ""
+    llm_use_subgoal_advisor: bool = True
+    llm_use_route_reranker: bool = True
+    llm_use_failure_diagnosis: bool = True
+    llm_use_handoff: bool = True
+    llm_retry_on_failure: bool = True
+    llm_max_retry_attempts: int = 1
 
 
 @dataclass
@@ -41,6 +48,8 @@ class SearchResult:
     root_children: int
     config_snapshot: dict
     routes: list[dict] = field(default_factory=list)
+    retry_attempts: int = 0
+    llm: dict = field(default_factory=dict)
 
 
 class SearchTree:
@@ -58,6 +67,7 @@ class SearchTree:
         filter_policy: OnnxFilterPolicy | None = None,
         ringbreaker_policy: OnnxTemplatePolicy | None = None,
         ringbreaker_templates: TemplateLibrary | None = None,
+        constraints: dict | None = None,
     ):
         self.stock = stock
         self.policy = policy
@@ -68,11 +78,15 @@ class SearchTree:
         self.filter_policy = filter_policy
         self.ringbreaker_policy = ringbreaker_policy
         self.ringbreaker_templates = ringbreaker_templates
+        self.constraints = constraints or {}
         self.root = SearchNode(state=SearchState(molecules=(target,), depth=0), prior=1.0)
 
         self._seen_states: set[tuple[str, ...]] = {self.root.state.key()}
         self._all_nodes: list[SearchNode] = [self.root]
         self._filter_runtime_error: str | None = None
+        self._constraint_drop_count = 0
+        self._subgoal_advisor_calls = 0
+        self._rerank_meta: dict = {"applied": False, "reason": "disabled_or_unavailable"}
         self.first_solution_iteration: int | None = None
         self.iterations: int = 0
 
@@ -100,7 +114,42 @@ class SearchTree:
             ):
                 self.llm_controller.maybe_adjust(self)
 
+        routes = self._collect_routes(self.config.max_routes * 3)
+        if (
+            self.llm_controller is not None
+            and self.config.llm_use_route_reranker
+            and routes
+            and hasattr(self.llm_controller, "rerank_routes")
+        ):
+            try:
+                routes, self._rerank_meta = self.llm_controller.rerank_routes(
+                    routes,
+                    objective={
+                        "constraints": self.constraints,
+                        "first_solution_iteration": self.first_solution_iteration,
+                        "iterations": self.iterations,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._rerank_meta = {
+                    "applied": False,
+                    "reason": "rerank_error",
+                    "error": str(exc),
+                }
+        routes = routes[: self.config.max_routes]
+
         solved = self.first_solution_iteration is not None or self.root.state.is_solved(self.stock)
+        llm_payload = {
+            "constraints": self.constraints,
+            "filter_runtime_error": self._filter_runtime_error,
+            "constraint_drop_count": self._constraint_drop_count,
+            "subgoal_advisor_calls": self._subgoal_advisor_calls,
+            "rerank": self._rerank_meta,
+            "final_diagnostics": self.diagnostics(),
+            "events": self.llm_controller.events_as_dict()
+            if self.llm_controller is not None
+            else [],
+        }
         return SearchResult(
             solved=solved,
             first_solution_iteration=self.first_solution_iteration,
@@ -108,7 +157,8 @@ class SearchTree:
             iterations=self.iterations,
             root_children=len(self.root.children),
             config_snapshot=asdict(self.config),
-            routes=self._collect_routes(self.config.max_routes),
+            routes=routes,
+            llm=llm_payload,
         )
 
     def diagnostics(self) -> dict:
@@ -123,6 +173,8 @@ class SearchTree:
             and self.ringbreaker_policy is not None
             and self.ringbreaker_templates is not None,
             "filter_runtime_error": self._filter_runtime_error,
+            "constraint_drop_count": self._constraint_drop_count,
+            "subgoal_advisor_calls": self._subgoal_advisor_calls,
         }
 
     def _select(self, node: SearchNode) -> SearchNode:
@@ -132,7 +184,12 @@ class SearchTree:
         return current
 
     def _expand(self, node: SearchNode) -> None:
-        if node.state.depth >= self.config.max_depth:
+        max_steps_constraint = self._constraint_max_steps()
+        effective_max_depth = self.config.max_depth
+        if max_steps_constraint is not None:
+            effective_max_depth = min(effective_max_depth, max_steps_constraint)
+
+        if node.state.depth >= effective_max_depth:
             node.expanded = True
             return
 
@@ -141,7 +198,7 @@ class SearchTree:
             node.expanded = True
             return
 
-        target = expandable[0]
+        target = self._select_expandable_target(node, expandable)
         children_added = self._expand_with_policy(
             node=node,
             target=target,
@@ -201,12 +258,20 @@ class SearchTree:
                         and filter_score < self.config.filter_cutoff
                     ):
                         continue
+                next_depth = node.state.depth + 1
+                if self._should_drop_by_constraints(
+                    reactant_smiles=[m.smiles for m in outcome.reactants],
+                    template_index=pred.index,
+                    next_depth=next_depth,
+                ):
+                    self._constraint_drop_count += 1
+                    continue
 
                 new_molecules = list(node.state.molecules)
                 new_molecules.remove(target)
                 new_molecules.extend(outcome.reactants)
                 child_state = SearchState(
-                    molecules=tuple(new_molecules), depth=node.state.depth + 1
+                    molecules=tuple(new_molecules), depth=next_depth
                 )
                 key = child_state.key()
                 if key in self._seen_states:
@@ -233,6 +298,76 @@ class SearchTree:
                 if len(node.children) >= self.config.max_children_per_node:
                     return children_added
         return children_added
+
+    def _constraint_max_steps(self) -> int | None:
+        raw = self.constraints.get("max_steps")
+        if raw is None:
+            return None
+        try:
+            value = int(raw)
+            return value if value > 0 else None
+        except Exception:
+            return None
+
+    def _select_expandable_target(
+        self, node: SearchNode, expandable: tuple[Molecule, ...]
+    ) -> Molecule:
+        if len(expandable) == 1:
+            return expandable[0]
+
+        if self.constraints.get("prefer_in_stock_subgoals"):
+            # Expand smaller molecules first as a weak proxy for purchasability.
+            return min(expandable, key=lambda mol: len(mol.smiles))
+
+        if (
+            self.llm_controller is not None
+            and self.config.llm_use_subgoal_advisor
+            and hasattr(self.llm_controller, "choose_expansion_target")
+        ):
+            try:
+                choice = self.llm_controller.choose_expansion_target(
+                    expandable_smiles=[mol.smiles for mol in expandable],
+                    context={
+                        "depth": node.state.depth,
+                        "num_expandable": len(expandable),
+                        "diagnostics": self.diagnostics(),
+                        "constraints": self.constraints,
+                    },
+                )
+                idx = int(choice.get("index", 0))
+                idx = max(0, min(len(expandable) - 1, idx))
+                self._subgoal_advisor_calls += 1
+                return expandable[idx]
+            except Exception:
+                pass
+        return expandable[0]
+
+    def _should_drop_by_constraints(
+        self, reactant_smiles: list[str], template_index: int, next_depth: int
+    ) -> bool:
+        max_steps = self._constraint_max_steps()
+        if max_steps is not None and next_depth > max_steps:
+            return True
+
+        avoid_templates = self.constraints.get("avoid_template_indices", [])
+        if isinstance(avoid_templates, list):
+            try:
+                avoid_set = {int(item) for item in avoid_templates}
+            except Exception:
+                avoid_set = set()
+            if template_index in avoid_set:
+                return True
+
+        avoid_reactants = self.constraints.get("avoid_reactants", [])
+        if isinstance(avoid_reactants, list):
+            lowered = [smiles.lower() for smiles in reactant_smiles]
+            for token in avoid_reactants:
+                token_s = str(token).strip().lower()
+                if not token_s:
+                    continue
+                if any(token_s in smi for smi in lowered):
+                    return True
+        return False
 
     def _evaluate(self, node: SearchNode) -> float:
         mask = node.state.in_stock_mask(self.stock)
