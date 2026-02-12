@@ -325,12 +325,21 @@ class LLMMetaController:
         routes: list[dict[str, Any]],
         constraints: dict[str, Any],
         diagnosis: dict[str, Any] | None,
+        no_route_reason: str | None = None,
     ) -> str:
         if not routes:
+            reason_text = {
+                "target_in_stock": "Target molecule is already in stock.",
+                "all_expansions_filtered_by_constraints": "All candidate expansions were filtered by constraints.",
+                "filter_runtime_error": "Reaction filter failed at runtime and no valid expansions remained.",
+                "no_valid_expansions": "No valid expansion was produced from available templates.",
+                "no_routes_after_ranking": "Routes were removed during ranking/selection.",
+            }.get(str(no_route_reason), "No valid route candidates were found.")
             return (
                 "# RetroLLM Handoff\n\n"
                 f"- Target: `{target_smiles}`\n"
                 "- No candidate routes available.\n"
+                f"- Reason: {reason_text}\n"
             )
 
         route_preview = []

@@ -152,6 +152,7 @@ def test_filter_cutoff_blocks_expansion() -> None:
 
     assert result.root_children == 0
     assert result.routes == []
+    assert result.no_route_reason == "no_valid_expansions"
 
 
 def test_constraint_avoid_reactants_blocks_expansion() -> None:
@@ -181,6 +182,7 @@ def test_constraint_avoid_reactants_blocks_expansion() -> None:
 
     assert result.root_children == 0
     assert result.llm["constraint_drop_count"] >= 1
+    assert result.no_route_reason == "all_expansions_filtered_by_constraints"
 
 
 def test_llm_rerank_metadata_is_recorded() -> None:
@@ -220,3 +222,28 @@ def test_llm_rerank_metadata_is_recorded() -> None:
     assert result.llm["rerank"]["applied"] is True
     assert result.routes
     assert result.routes[0]["llm_rank"] == 1
+
+
+def test_target_in_stock_reports_no_route_reason() -> None:
+    stock = _DummyStock({"CCO"})
+    base_policy = _DummyPolicy([TemplatePrediction(index=0, probability=0.9)])
+    templates = _DummyTemplates({0: "base"})
+    reaction_engine = _DummyReactionEngine({})
+    tree = SearchTree(
+        target=Molecule("CCO"),
+        stock=stock,  # type: ignore[arg-type]
+        policy=base_policy,  # type: ignore[arg-type]
+        templates=templates,  # type: ignore[arg-type]
+        reaction_engine=reaction_engine,  # type: ignore[arg-type]
+        config=SearchConfig(
+            iteration_limit=3,
+            topk_templates=1,
+            use_filter=False,
+            use_ringbreaker=False,
+        ),
+    )
+    result = tree.run()
+
+    assert result.solved is True
+    assert result.routes == []
+    assert result.no_route_reason == "target_in_stock"

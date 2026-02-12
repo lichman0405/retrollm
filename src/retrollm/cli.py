@@ -11,6 +11,7 @@ from typing import Any
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 
 def _project_root() -> Path:
@@ -65,81 +66,205 @@ def _format_float(value: Any) -> str:
         return str(value)
 
 
+def _build_console(no_color: bool = False) -> Console:
+    return Console(no_color=no_color)
+
+
+def _yes_no_text(value: bool) -> Text:
+    return Text("yes" if value else "no", style="bold green" if value else "bold red")
+
+
+def _bool_text(value: bool) -> Text:
+    return Text(str(value), style="bold green" if value else "bold red")
+
+
+def _source_text(value: str) -> Text:
+    style = {
+        "llm": "bold cyan",
+        "heuristic_fallback": "yellow",
+        "heuristic_without_llm": "yellow",
+        "empty": "dim",
+    }.get(value, "white")
+    return Text(value, style=style)
+
+
+def _no_route_reason_message(reason: str | None) -> tuple[str, str]:
+    return {
+        "target_in_stock": (
+            "No route candidates: target molecule is already in stock.",
+            "green",
+        ),
+        "all_expansions_filtered_by_constraints": (
+            "No route candidates: all expansions were filtered by constraints.",
+            "yellow",
+        ),
+        "filter_runtime_error": (
+            "No route candidates: filter policy failed at runtime and no valid expansions remained.",
+            "red",
+        ),
+        "no_valid_expansions": (
+            "No route candidates: no valid expansion from templates.",
+            "yellow",
+        ),
+        "no_routes_after_ranking": ("No route candidates after ranking.", "yellow"),
+    }.get(reason, ("No route candidates found.", "yellow"))
+
+
 def _render_search_result(
     console: Console, payload: dict[str, Any], output_path: str | None, verbose: bool
 ) -> None:
-    summary = Table(show_header=False, box=None)
-    summary.add_row("Solved", "yes" if payload.get("solved") else "no")
-    summary.add_row(
-        "First solution iteration", str(payload.get("first_solution_iteration") or "-")
-    )
-    summary.add_row("Iterations", str(payload.get("iterations")))
-    summary.add_row("Search time (s)", _format_float(payload.get("search_time_s")))
-    summary.add_row("Root children", str(payload.get("root_children")))
-    summary.add_row("Retry attempts", str(payload.get("retry_attempts", 0)))
-    if output_path:
-        summary.add_row("Saved JSON", str(Path(output_path).resolve()))
+    solved = bool(payload.get("solved"))
+    reason = str(payload.get("no_route_reason")) if payload.get("no_route_reason") else None
 
-    console.print(Panel(summary, title="Search Summary", expand=False))
+    summary = Table(show_header=False, box=None, pad_edge=False)
+    summary.add_column("Field", style="bold cyan", no_wrap=True)
+    summary.add_column("Value", style="white")
+    summary.add_row("Solved", _yes_no_text(solved))
+    summary.add_row(
+        "First solution iteration",
+        Text(str(payload.get("first_solution_iteration") or "-"), style="white"),
+    )
+    summary.add_row("Iterations", Text(str(payload.get("iterations")), style="white"))
+    summary.add_row(
+        "Search time (s)",
+        Text(_format_float(payload.get("search_time_s")), style="white"),
+    )
+    summary.add_row("Root children", Text(str(payload.get("root_children")), style="white"))
+    retry_attempts = int(payload.get("retry_attempts", 0) or 0)
+    summary.add_row(
+        "Retry attempts",
+        Text(str(retry_attempts), style="bold yellow" if retry_attempts > 0 else "green"),
+    )
+    if reason:
+        summary.add_row("No-route reason", Text(reason, style="bold yellow"))
+    if output_path:
+        summary.add_row(
+            "Saved JSON",
+            Text(str(Path(output_path).resolve()), style="cyan"),
+        )
+
+    console.print(
+        Panel(
+            summary,
+            title="Search Summary",
+            border_style="green" if solved else "red",
+            expand=False,
+        )
+    )
 
     llm_payload = payload.get("llm", {})
     constraints = llm_payload.get("constraints", {})
     if constraints:
-        ctable = Table(show_header=False, box=None)
-        ctable.add_row("source", str(constraints.get("source", "unknown")))
-        ctable.add_row("avoid_reactants", ", ".join(constraints.get("avoid_reactants", [])) or "-")
+        ctable = Table(show_header=False, box=None, pad_edge=False)
+        ctable.add_column("Field", style="bold cyan", no_wrap=True)
+        ctable.add_column("Value", style="white")
+        source = str(constraints.get("source", "unknown"))
+        ctable.add_row("source", _source_text(source))
+        ctable.add_row(
+            "avoid_reactants",
+            Text(", ".join(constraints.get("avoid_reactants", [])) or "-", style="white"),
+        )
         ctable.add_row(
             "avoid_template_indices",
-            ", ".join(str(v) for v in constraints.get("avoid_template_indices", [])) or "-",
+            Text(
+                ", ".join(str(v) for v in constraints.get("avoid_template_indices", []))
+                or "-",
+                style="white",
+            ),
         )
-        ctable.add_row("max_steps", str(constraints.get("max_steps", "-")))
+        ctable.add_row("max_steps", Text(str(constraints.get("max_steps", "-")), style="white"))
         ctable.add_row(
             "prefer_in_stock_subgoals",
-            str(constraints.get("prefer_in_stock_subgoals", False)),
+            _bool_text(bool(constraints.get("prefer_in_stock_subgoals", False))),
         )
         notes = str(constraints.get("notes", "")).strip()
         if notes:
-            ctable.add_row("notes", notes)
-        console.print(Panel(ctable, title="Constraint Translation", expand=False))
+            ctable.add_row("notes", Text(notes, style="dim"))
+        console.print(
+            Panel(
+                ctable,
+                title="Constraint Translation",
+                border_style="cyan",
+                expand=False,
+            )
+        )
 
     rerank = llm_payload.get("rerank", {})
     if rerank:
-        rtable = Table(show_header=False, box=None)
-        rtable.add_row("applied", str(rerank.get("applied", False)))
-        rtable.add_row("mode", str(rerank.get("mode", "-")))
-        rtable.add_row("reason", str(rerank.get("global_reason", rerank.get("reason", "-"))))
+        rtable = Table(show_header=False, box=None, pad_edge=False)
+        rtable.add_column("Field", style="bold cyan", no_wrap=True)
+        rtable.add_column("Value", style="white")
+        applied = bool(rerank.get("applied", False))
+        mode = str(rerank.get("mode", "-"))
+        rtable.add_row("applied", _bool_text(applied))
+        rtable.add_row(
+            "mode",
+            Text(mode, style="bold cyan" if mode == "llm" else "yellow"),
+        )
+        rtable.add_row(
+            "reason",
+            Text(str(rerank.get("global_reason", rerank.get("reason", "-"))), style="white"),
+        )
         if rerank.get("error"):
-            rtable.add_row("error", str(rerank.get("error")))
-        console.print(Panel(rtable, title="Route Rerank", expand=False))
+            rtable.add_row("error", Text(str(rerank.get("error")), style="bold red"))
+        console.print(Panel(rtable, title="Route Rerank", border_style="blue", expand=False))
 
     diagnosis = llm_payload.get("diagnosis")
     if isinstance(diagnosis, dict) and diagnosis:
-        dtable = Table(show_header=False, box=None)
-        dtable.add_row("source", str(diagnosis.get("source", "-")))
-        dtable.add_row("diagnosis", str(diagnosis.get("diagnosis", "-")))
-        dtable.add_row("rationale", str(diagnosis.get("rationale", "-")))
-        dtable.add_row("retry_plan", json.dumps(diagnosis.get("retry_plan", {}), ensure_ascii=False))
-        console.print(Panel(dtable, title="Failure Diagnosis", expand=False))
+        dtable = Table(show_header=False, box=None, pad_edge=False)
+        dtable.add_column("Field", style="bold yellow", no_wrap=True)
+        dtable.add_column("Value", style="white")
+        dtable.add_row("source", _source_text(str(diagnosis.get("source", "-"))))
+        dtable.add_row("diagnosis", Text(str(diagnosis.get("diagnosis", "-")), style="white"))
+        dtable.add_row("rationale", Text(str(diagnosis.get("rationale", "-")), style="dim"))
+        dtable.add_row(
+            "retry_plan",
+            Text(json.dumps(diagnosis.get("retry_plan", {}), ensure_ascii=False), style="white"),
+        )
+        console.print(
+            Panel(dtable, title="Failure Diagnosis", border_style="yellow", expand=False)
+        )
 
     routes = payload.get("routes", [])
     if not routes:
-        console.print("No route candidates found.")
-    for idx, route in enumerate(routes, start=1):
-        header = (
-            f"score={_format_float(route.get('score'))}  "
-            f"visits={route.get('visits')}  depth={route.get('depth')}  "
-            f"solved={'yes' if route.get('solved') else 'no'}  "
-            f"llm_rank={route.get('llm_rank', '-')}"
+        reason_text, reason_style = _no_route_reason_message(reason)
+        console.print(
+            Panel(
+                Text(reason_text, style=f"bold {reason_style}"),
+                title="Route Search",
+                border_style=reason_style,
+                expand=False,
+            )
         )
-        console.print(Panel(header, title=f"Route {idx}", expand=False))
-        steps = Table()
+    for idx, route in enumerate(routes, start=1):
+        route_solved = bool(route.get("solved"))
+        header = Text()
+        header.append("score=", style="bold cyan")
+        header.append(_format_float(route.get("score")), style="white")
+        header.append("  visits=", style="bold cyan")
+        header.append(str(route.get("visits")), style="white")
+        header.append("  depth=", style="bold cyan")
+        header.append(str(route.get("depth")), style="white")
+        header.append("  solved=", style="bold cyan")
+        header.append("yes" if route_solved else "no", style="bold green" if route_solved else "bold red")
+        header.append("  llm_rank=", style="bold cyan")
+        header.append(str(route.get("llm_rank", "-")), style="white")
+        console.print(
+            Panel(
+                header,
+                title=f"Route {idx}",
+                border_style="green" if route_solved else "cyan",
+                expand=False,
+            )
+        )
+        steps = Table(header_style="bold cyan", row_styles=["none", "dim"])
         steps.add_column("Step", no_wrap=True)
         steps.add_column("Expanded", overflow="fold")
         steps.add_column("Reactants", overflow="fold")
         steps.add_column("Template", no_wrap=True)
         steps.add_column("Source", no_wrap=True)
-        steps.add_column("p_tmpl", no_wrap=True, justify="right")
-        steps.add_column("p_filt", no_wrap=True, justify="right")
+        steps.add_column("p_tmpl", no_wrap=True, justify="right", style="green")
+        steps.add_column("p_filt", no_wrap=True, justify="right", style="yellow")
         for step in route.get("steps", []):
             steps.add_row(
                 str(step.get("step", "")),
@@ -152,26 +277,59 @@ def _render_search_result(
             )
         console.print(steps)
         if route.get("llm_rank_reason"):
-            console.print(f"LLM reason: {route.get('llm_rank_reason')}")
+            console.print(
+                Text(
+                    f"LLM reason: {route.get('llm_rank_reason')}",
+                    style="bold cyan",
+                )
+            )
 
     handoff = llm_payload.get("handoff_markdown")
     if isinstance(handoff, str) and handoff.strip():
         preview_lines = handoff.strip().splitlines()[:10]
-        console.print(Panel("\n".join(preview_lines), title="Handoff Preview", expand=False))
+        console.print(
+            Panel(
+                "\n".join(preview_lines),
+                title="Handoff Preview",
+                border_style="white",
+                expand=False,
+            )
+        )
 
     if verbose:
         cfg = payload.get("config_snapshot", {})
-        console.print(Panel(json.dumps(cfg, indent=2), title="Config Snapshot"))
+        console.print(
+            Panel(
+                json.dumps(cfg, indent=2),
+                title="Config Snapshot",
+                border_style="bright_black",
+            )
+        )
         events = llm_payload.get("events", [])
         if isinstance(events, list) and events:
-            event_table = Table("Stage", "Message", "Payload")
+            event_table = Table(
+                "Stage",
+                "Message",
+                "Payload",
+                header_style="bold cyan",
+                row_styles=["none", "dim"],
+            )
             for event in events[-20:]:
+                stage = str(event.get("stage", ""))
+                stage_style = {
+                    "constraint_translation": "cyan",
+                    "meta_control": "blue",
+                    "subgoal_advisor": "green",
+                    "route_rerank": "cyan",
+                    "failure_diagnosis": "yellow",
+                    "handoff": "white",
+                }.get(stage, "white")
                 event_table.add_row(
-                    str(event.get("stage", "")),
-                    str(event.get("message", "")),
-                    json.dumps(event.get("payload", {}), ensure_ascii=False),
+                    Text(stage, style=stage_style),
+                    Text(str(event.get("message", "")), style="white"),
+                    Text(json.dumps(event.get("payload", {}), ensure_ascii=False), style="dim"),
                 )
-            console.print(Panel(event_table, title="LLM Events"))
+            console.print(Panel(event_table, title="LLM Events", border_style="bright_black"))
 
 
 def _cmd_search(args: argparse.Namespace) -> int:
@@ -210,7 +368,7 @@ def _cmd_search(args: argparse.Namespace) -> int:
         if isinstance(handoff, str) and handoff.strip():
             report_path = _write_text(args.report, handoff)
 
-    console = Console()
+    console = _build_console(no_color=args.no_color)
     if args.json:
         console.print(json.dumps(payload, indent=2))
     else:
@@ -225,7 +383,7 @@ def _cmd_search(args: argparse.Namespace) -> int:
 def _render_doctor_report(
     console: Console, payload: dict[str, Any], output_path: str | None
 ) -> None:
-    table = Table()
+    table = Table(header_style="bold cyan", row_styles=["none", "dim"])
     table.add_column("Check", overflow="fold")
     table.add_column("Status", no_wrap=True)
     table.add_column("Detail", overflow="fold")
@@ -242,10 +400,11 @@ def _render_doctor_report(
             str(check.get("hint", "")),
         )
 
-    console.print(table)
+    console.print(Panel(table, title="Doctor Report", border_style="cyan", expand=False))
     if output_path:
-        console.print(f"Saved JSON: {Path(output_path).resolve()}")
-    console.print(f"Overall: {'OK' if payload.get('ok') else 'FAIL'}")
+        console.print(Text(f"Saved JSON: {Path(output_path).resolve()}", style="cyan"))
+    overall_ok = bool(payload.get("ok"))
+    console.print(Text(f"Overall: {'OK' if overall_ok else 'FAIL'}", style="bold green" if overall_ok else "bold red"))
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -257,7 +416,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     if args.output:
         _write_json(args.output, payload)
 
-    console = Console()
+    console = _build_console(no_color=args.no_color)
     if args.json:
         console.print(json.dumps(payload, indent=2))
     else:
@@ -311,6 +470,7 @@ def _set_common_search_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="Print raw JSON result")
     parser.add_argument("--output", help="Write JSON result to a file")
     parser.add_argument("--report", help="Write markdown handoff report to a file")
+    parser.add_argument("--no-color", action="store_true", help="Disable colored terminal output")
     parser.add_argument("--verbose", action="store_true")
 
 
@@ -344,6 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc.add_argument("--config", default="./data/config.yml", help="Path to config.yml")
     p_doc.add_argument("--json", action="store_true", help="Print raw JSON report")
     p_doc.add_argument("--output", help="Write JSON report to a file")
+    p_doc.add_argument("--no-color", action="store_true", help="Disable colored terminal output")
     p_doc.set_defaults(func=_cmd_doctor)
 
     return p

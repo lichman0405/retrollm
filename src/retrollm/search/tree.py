@@ -48,6 +48,7 @@ class SearchResult:
     root_children: int
     config_snapshot: dict
     routes: list[dict] = field(default_factory=list)
+    no_route_reason: str | None = None
     retry_attempts: int = 0
     llm: dict = field(default_factory=dict)
 
@@ -139,12 +140,14 @@ class SearchTree:
         routes = routes[: self.config.max_routes]
 
         solved = self.first_solution_iteration is not None or self.root.state.is_solved(self.stock)
+        no_route_reason = self._infer_no_route_reason(routes=routes, solved=solved)
         llm_payload = {
             "constraints": self.constraints,
             "filter_runtime_error": self._filter_runtime_error,
             "constraint_drop_count": self._constraint_drop_count,
             "subgoal_advisor_calls": self._subgoal_advisor_calls,
             "rerank": self._rerank_meta,
+            "no_route_reason": no_route_reason,
             "final_diagnostics": self.diagnostics(),
             "events": self.llm_controller.events_as_dict()
             if self.llm_controller is not None
@@ -158,6 +161,7 @@ class SearchTree:
             root_children=len(self.root.children),
             config_snapshot=asdict(self.config),
             routes=routes,
+            no_route_reason=no_route_reason,
             llm=llm_payload,
         )
 
@@ -449,3 +453,20 @@ class SearchTree:
             "molecules": [mol.smiles for mol in node.state.molecules],
             "steps": steps,
         }
+
+    def _infer_no_route_reason(self, routes: list[dict], solved: bool) -> str | None:
+        if routes:
+            return None
+        if solved and self.root.state.is_solved(self.stock):
+            return "target_in_stock"
+        if self._constraint_drop_count > 0 and self.root_children_count == 0:
+            return "all_expansions_filtered_by_constraints"
+        if self._filter_runtime_error and self.root_children_count == 0:
+            return "filter_runtime_error"
+        if self.root_children_count == 0:
+            return "no_valid_expansions"
+        return "no_routes_after_ranking"
+
+    @property
+    def root_children_count(self) -> int:
+        return len(self.root.children)

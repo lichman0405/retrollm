@@ -99,6 +99,7 @@ class Planner:
                 routes=result.routes,
                 constraints=constraints,
                 diagnosis=result.llm.get("diagnosis"),
+                no_route_reason=result.no_route_reason,
             )
             result.llm["handoff_markdown"] = handoff
         return result

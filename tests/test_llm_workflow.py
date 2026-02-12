@@ -86,3 +86,16 @@ def test_generate_handoff_fallback() -> None:
         diagnosis=None,
     )
     assert "RetroLLM Handoff" in text
+
+
+def test_generate_handoff_with_no_route_reason() -> None:
+    controller = _make_controller([])
+    text = controller.generate_handoff(
+        target_smiles="O=C(O)c1ccc(C(=O)O)cc1",
+        routes=[],
+        constraints={},
+        diagnosis=None,
+        no_route_reason="target_in_stock",
+    )
+    assert "No candidate routes available." in text
+    assert "Reason: Target molecule is already in stock." in text
